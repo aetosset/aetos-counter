@@ -1,7 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
-import { AppConfig, UserSession, showConnect, openContractCall } from '@stacks/connect';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { STACKS_MAINNET } from '@stacks/network';
 import {
   uintCV,
@@ -13,15 +12,38 @@ import {
 const CONTRACT_ADDRESS = 'SP312F1KXPTFJH6BHVFJTB5VYYGZQBYPYC7VT62SV';
 const CONTRACT_NAME = 'counter';
 
-const appConfig = new AppConfig(['store_write', 'publish_data']);
-const userSession = new UserSession({ appConfig });
-
 export default function CounterApp() {
   const [counter, setCounter] = useState<number | null>(null);
   const [lastCaller, setLastCaller] = useState<string | null>(null);
   const [userData, setUserData] = useState<any>(null);
   const [loading, setLoading] = useState(false);
   const [txId, setTxId] = useState<string | null>(null);
+  const [connectLib, setConnectLib] = useState<any>(null);
+  const [userSession, setUserSession] = useState<any>(null);
+
+  // Lazy load @stacks/connect to avoid SSR issues
+  useEffect(() => {
+    const loadConnect = async () => {
+      try {
+        const connect = await import('@stacks/connect');
+        const { AppConfig, UserSession } = connect;
+        
+        const appConfig = new AppConfig(['store_write', 'publish_data']);
+        const session = new UserSession({ appConfig });
+        
+        setConnectLib(connect);
+        setUserSession(session);
+        
+        if (session.isUserSignedIn()) {
+          setUserData(session.loadUserData());
+        }
+      } catch (e) {
+        console.error('Error loading Stacks Connect:', e);
+      }
+    };
+    
+    loadConnect();
+  }, []);
 
   const fetchCounter = useCallback(async () => {
     try {
@@ -63,10 +85,6 @@ export default function CounterApp() {
     fetchCounter();
     fetchLastCaller();
     
-    if (userSession.isUserSignedIn()) {
-      setUserData(userSession.loadUserData());
-    }
-    
     // Poll for updates every 30 seconds
     const interval = setInterval(() => {
       fetchCounter();
@@ -76,40 +94,47 @@ export default function CounterApp() {
     return () => clearInterval(interval);
   }, [fetchCounter, fetchLastCaller]);
 
-  const connectWallet = () => {
-    showConnect({
-      appDetails: {
-        name: 'Aetos Counter',
-        icon: 'https://placekitten.com/200/200',
-      },
-      redirectTo: '/',
-      onFinish: () => {
-        setUserData(userSession.loadUserData());
-      },
-      userSession,
-    });
+  const connectWallet = async () => {
+    if (!connectLib || !userSession) return;
+    
+    try {
+      connectLib.showConnect({
+        appDetails: {
+          name: 'Aetos Counter',
+          icon: window.location.origin + '/favicon.ico',
+        },
+        redirectTo: '/',
+        onFinish: () => {
+          setUserData(userSession.loadUserData());
+        },
+        userSession,
+      });
+    } catch (e) {
+      console.error('Error connecting wallet:', e);
+    }
   };
 
   const disconnect = () => {
+    if (!userSession) return;
     userSession.signUserOut('/');
     setUserData(null);
   };
 
   const callContract = async (functionName: string, args: any[] = []) => {
-    if (!userData) return;
+    if (!userData || !connectLib) return;
     
     setLoading(true);
     setTxId(null);
     
     try {
-      await openContractCall({
+      await connectLib.openContractCall({
         contractAddress: CONTRACT_ADDRESS,
         contractName: CONTRACT_NAME,
         functionName,
         functionArgs: args,
         network: STACKS_MAINNET,
         postConditionMode: PostConditionMode.Allow,
-        onFinish: (data) => {
+        onFinish: (data: any) => {
           setTxId(data.txId);
           setLoading(false);
           // Refresh after a delay
@@ -168,16 +193,17 @@ export default function CounterApp() {
           {!userData ? (
             <button
               onClick={connectWallet}
-              className="w-full py-4 px-6 bg-gradient-to-r from-blue-500 to-purple-600 hover:from-blue-600 hover:to-purple-700 rounded-xl font-semibold text-lg transition-all duration-200 shadow-lg hover:shadow-xl"
+              disabled={!connectLib}
+              className="w-full py-4 px-6 bg-gradient-to-r from-blue-500 to-purple-600 hover:from-blue-600 hover:to-purple-700 rounded-xl font-semibold text-lg transition-all duration-200 shadow-lg hover:shadow-xl disabled:opacity-50"
             >
-              Connect Wallet
+              {connectLib ? 'Connect Wallet' : 'Loading...'}
             </button>
           ) : (
             <div className="space-y-4">
               <div className="flex items-center justify-between bg-gray-800/50 rounded-xl p-4 border border-gray-700">
                 <span className="text-gray-400">Connected:</span>
                 <span className="font-mono text-sm">
-                  {userData.profile.stxAddress.mainnet.slice(0, 8)}...{userData.profile.stxAddress.mainnet.slice(-4)}
+                  {userData.profile?.stxAddress?.mainnet?.slice(0, 8)}...{userData.profile?.stxAddress?.mainnet?.slice(-4)}
                 </span>
                 <button
                   onClick={disconnect}
