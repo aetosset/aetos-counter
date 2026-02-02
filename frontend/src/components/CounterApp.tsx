@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { STACKS_MAINNET } from '@stacks/network';
 import {
   uintCV,
@@ -20,29 +20,35 @@ export default function CounterApp() {
   const [txId, setTxId] = useState<string | null>(null);
   const [connectLib, setConnectLib] = useState<any>(null);
   const [userSession, setUserSession] = useState<any>(null);
+  const [connectError, setConnectError] = useState<string | null>(null);
 
   // Lazy load @stacks/connect to avoid SSR issues
   useEffect(() => {
     const loadConnect = async () => {
       try {
-        const connect = await import('@stacks/connect');
-        const { AppConfig, UserSession } = connect;
+        // Dynamically import to avoid SSR issues
+        const connectModule = await import('@stacks/connect');
+        const { AppConfig, UserSession, showConnect, openContractCall } = connectModule;
         
         const appConfig = new AppConfig(['store_write', 'publish_data']);
         const session = new UserSession({ appConfig });
         
-        setConnectLib(connect);
+        setConnectLib({ showConnect, openContractCall });
         setUserSession(session);
         
         if (session.isUserSignedIn()) {
           setUserData(session.loadUserData());
         }
-      } catch (e) {
+      } catch (e: any) {
         console.error('Error loading Stacks Connect:', e);
+        // Still try to work with whatever provider exists
+        setConnectError(e.message || 'Failed to load wallet connector');
       }
     };
     
-    loadConnect();
+    // Small delay to let wallet extensions initialize first
+    const timer = setTimeout(loadConnect, 100);
+    return () => clearTimeout(timer);
   }, []);
 
   const fetchCounter = useCallback(async () => {
@@ -95,7 +101,24 @@ export default function CounterApp() {
   }, [fetchCounter, fetchLastCaller]);
 
   const connectWallet = async () => {
-    if (!connectLib || !userSession) return;
+    if (!connectLib || !userSession) {
+      // Fallback: try to use existing StacksProvider if available
+      if (typeof window !== 'undefined' && (window as any).StacksProvider) {
+        try {
+          const provider = (window as any).StacksProvider;
+          const response = await provider.authenticationRequest();
+          if (response) {
+            setUserData({ profile: { stxAddress: { mainnet: response.address } } });
+          }
+        } catch (e) {
+          console.error('Fallback auth failed:', e);
+          alert('Please install a Stacks wallet (Leather, Xverse) to connect');
+        }
+        return;
+      }
+      alert('Wallet connector not loaded. Please refresh or install a Stacks wallet.');
+      return;
+    }
     
     try {
       connectLib.showConnect({
@@ -115,38 +138,46 @@ export default function CounterApp() {
   };
 
   const disconnect = () => {
-    if (!userSession) return;
-    userSession.signUserOut('/');
+    if (userSession) {
+      userSession.signUserOut('/');
+    }
     setUserData(null);
   };
 
   const callContract = async (functionName: string, args: any[] = []) => {
-    if (!userData || !connectLib) return;
+    if (!userData) return;
     
     setLoading(true);
     setTxId(null);
     
     try {
-      await connectLib.openContractCall({
-        contractAddress: CONTRACT_ADDRESS,
-        contractName: CONTRACT_NAME,
-        functionName,
-        functionArgs: args,
-        network: STACKS_MAINNET,
-        postConditionMode: PostConditionMode.Allow,
-        onFinish: (data: any) => {
-          setTxId(data.txId);
-          setLoading(false);
-          // Refresh after a delay
-          setTimeout(() => {
-            fetchCounter();
-            fetchLastCaller();
-          }, 5000);
-        },
-        onCancel: () => {
-          setLoading(false);
-        },
-      });
+      if (connectLib?.openContractCall) {
+        await connectLib.openContractCall({
+          contractAddress: CONTRACT_ADDRESS,
+          contractName: CONTRACT_NAME,
+          functionName,
+          functionArgs: args,
+          network: STACKS_MAINNET,
+          postConditionMode: PostConditionMode.Allow,
+          onFinish: (data: any) => {
+            setTxId(data.txId);
+            setLoading(false);
+            setTimeout(() => {
+              fetchCounter();
+              fetchLastCaller();
+            }, 5000);
+          },
+          onCancel: () => {
+            setLoading(false);
+          },
+        });
+      } else if (typeof window !== 'undefined' && (window as any).StacksProvider) {
+        // Fallback to direct provider call
+        const provider = (window as any).StacksProvider;
+        // This is a simplified fallback
+        alert('Direct provider transactions not yet implemented. Please refresh the page.');
+        setLoading(false);
+      }
     } catch (e) {
       console.error('Error calling contract:', e);
       setLoading(false);
@@ -156,6 +187,8 @@ export default function CounterApp() {
   const increment = () => callContract('increment');
   const decrement = () => callContract('decrement');
   const incrementBy = (amount: number) => callContract('increment-by', [uintCV(amount)]);
+
+  const walletReady = connectLib && userSession;
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-gray-900 to-black text-white">
@@ -191,13 +224,19 @@ export default function CounterApp() {
         {/* Actions */}
         <div className="max-w-md mx-auto">
           {!userData ? (
-            <button
-              onClick={connectWallet}
-              disabled={!connectLib}
-              className="w-full py-4 px-6 bg-gradient-to-r from-blue-500 to-purple-600 hover:from-blue-600 hover:to-purple-700 rounded-xl font-semibold text-lg transition-all duration-200 shadow-lg hover:shadow-xl disabled:opacity-50"
-            >
-              {connectLib ? 'Connect Wallet' : 'Loading...'}
-            </button>
+            <div className="space-y-4">
+              <button
+                onClick={connectWallet}
+                className="w-full py-4 px-6 bg-gradient-to-r from-blue-500 to-purple-600 hover:from-blue-600 hover:to-purple-700 rounded-xl font-semibold text-lg transition-all duration-200 shadow-lg hover:shadow-xl"
+              >
+                Connect Wallet
+              </button>
+              {connectError && (
+                <p className="text-yellow-500 text-xs text-center">
+                  Note: {connectError}. You may need to refresh after installing a wallet.
+                </p>
+              )}
+            </div>
           ) : (
             <div className="space-y-4">
               <div className="flex items-center justify-between bg-gray-800/50 rounded-xl p-4 border border-gray-700">
@@ -272,6 +311,15 @@ export default function CounterApp() {
               className="text-blue-400 hover:text-blue-300"
             >
               GitHub
+            </a>
+            {' · '}
+            <a
+              href={`https://explorer.hiro.so/address/${CONTRACT_ADDRESS}?chain=mainnet`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-blue-400 hover:text-blue-300"
+            >
+              Contract
             </a>
           </p>
         </div>
