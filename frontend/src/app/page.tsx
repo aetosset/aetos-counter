@@ -27,11 +27,12 @@ export default function Home() {
       );
       const data = await res.json();
       if (data.okay && data.result) {
-        // Parse Clarity uint response (0x prefix + hex)
+        // Parse Clarity (ok uint) response: 0x0701 + 16 bytes big-endian
+        // 07 = ok, 01 = uint type
         const hex = data.result.replace('0x', '');
-        // Clarity uint is encoded as 01 (type) + 16 bytes big-endian
-        if (hex.startsWith('01')) {
-          const valueHex = hex.slice(2);
+        if (hex.startsWith('0701')) {
+          // Skip 0701, take last 8 chars (32-bit safe for reasonable counters)
+          const valueHex = hex.slice(-8);
           const value = parseInt(valueHex, 16);
           setCounter(value);
         }
